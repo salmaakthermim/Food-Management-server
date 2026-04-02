@@ -3,14 +3,14 @@ const cors = require('cors');
 const app = express()
 require('dotenv').config()
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
-const port = process.env.PORT || 3000
+const port = process.env.PORT || 5000
 
 // middleware
 app.use(express.json());
 app.use(cors());
 
 
-const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.2o3am.mongodb.net/?appName=Cluster0`;
+const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.z4bua.mongodb.net/?appName=Cluster0`;
 
 // Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(uri, {
@@ -29,6 +29,112 @@ async function run() {
     const db = client.db('food_db');
     const usersCollection = db.collection('users');
     const foodsCollection = db.collection('foods');
+    const cartsCollection = db.collection('carts');
+    const ordersCollection = db.collection('orders');
+
+    // ==========================================
+    // CARTS API ENDPOINTS
+    // ==========================================
+
+    // GET cart items by user email
+    app.get("/carts", async (req, res) => {
+      const email = req.query.email;
+      if (!email) {
+        return res.send([]);
+      }
+      const query = { email: email };
+      const result = await cartsCollection.find(query).toArray();
+      res.send(result);
+    });
+
+    // POST item to cart
+    app.post("/carts", async (req, res) => {
+      const cartItem = req.body;
+      const result = await cartsCollection.insertOne(cartItem);
+      res.send(result);
+    });
+
+    // DELETE item from cart
+    app.delete("/carts/:id", async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await cartsCollection.deleteOne(query);
+      res.send(result);
+    });
+
+    // PATCH update quantity in cart
+    app.patch("/carts/:id", async (req, res) => {
+      const id = req.params.id;
+      const { quantity } = req.body;
+      const filter = { _id: new ObjectId(id) };
+      const updateDoc = {
+        $set: { quantity: quantity },
+      };
+      const result = await cartsCollection.updateOne(filter, updateDoc);
+      res.send(result);
+    });
+    // ==========================================
+
+    // ==========================================
+    // ORDERS API ENDPOINTS
+    // ==========================================
+
+    // POST a new order
+    app.post("/orders", async (req, res) => {
+      const orderData = req.body;
+      const result = await ordersCollection.insertOne(orderData);
+      res.send(result);
+    });
+
+    // GET all orders (For Admin)
+    app.get("/orders/admin/all", async (req, res) => {
+      const result = await ordersCollection.find().sort({ timestamp: -1 }).toArray();
+      res.send(result);
+    });
+
+    // GET orders by user email
+    app.get("/orders", async (req, res) => {
+      const email = req.query.email;
+      if (!email) {
+        return res.send([]);
+      }
+      const query = { customerEmail: email };
+      const result = await ordersCollection.find(query).sort({ timestamp: -1 }).toArray();
+      res.send(result);
+    });
+
+    // PATCH update order status (For Admin)
+    app.patch("/orders/:id/status", async (req, res) => {
+      const id = req.params.id;
+      const { status } = req.body;
+      const filter = { _id: new ObjectId(id) };
+      const updateDoc = {
+        $set: { status: status },
+      };
+      const result = await ordersCollection.updateOne(filter, updateDoc);
+      res.send(result);
+    });
+    // ==========================================
+
+    // ==========================================
+    // REVIEWS API ENDPOINTS
+    // ==========================================
+    const reviewsCollection = db.collection('reviews');
+
+    app.post("/reviews", async (req, res) => {
+      const review = req.body;
+      review.timestamp = new Date();
+      const result = await reviewsCollection.insertOne(review);
+      res.send(result);
+    });
+
+    app.get("/reviews/:foodId", async (req, res) => {
+      const foodId = req.params.foodId;
+      const query = { foodId: foodId };
+      const result = await reviewsCollection.find(query).sort({ timestamp: -1 }).toArray();
+      res.send(result);
+    });
+    // ==========================================
 
 
     // 🔥 ONLY Google Users Save API
@@ -61,14 +167,39 @@ async function run() {
         });
       }
 
+      // Set default role to customer
+      const newUser = {
+        ...user,
+        role: "customer",
+        createdAt: new Date()
+      };
+
       // Save Google user to DB
-      const result = await usersCollection.insertOne(user);
+      const result = await usersCollection.insertOne(newUser);
 
       res.send({
         success: true,
-        message: "Google user saved successfully",
+        message: "User saved successfully",
         data: result
       });
+    });
+
+    // GET all users (For Admin Dashboard)
+    app.get("/users", async (req, res) => {
+      const result = await usersCollection.find().toArray();
+      res.send(result);
+    });
+
+    // GET user role by email
+    app.get("/users/role/:email", async (req, res) => {
+      const email = req.params.email;
+      const query = { email: email };
+      const user = await usersCollection.findOne(query);
+      let role = "customer";
+      if (user?.role) {
+        role = user.role;
+      }
+      res.send({ role });
     });
 
 
