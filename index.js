@@ -31,6 +31,8 @@ async function run() {
     const foodsCollection = db.collection('foods');
     const cartsCollection = db.collection('carts');
     const ordersCollection = db.collection('orders');
+    const reviewsCollection = db.collection('reviews');
+    const wishlistsCollection = db.collection('wishlists');
 
     // ==========================================
     // CARTS API ENDPOINTS
@@ -76,7 +78,39 @@ async function run() {
     // ==========================================
 
     // ==========================================
-    // ORDERS API ENDPOINTS
+    // DELIVERY API ENDPOINTS
+    // ==========================================
+
+    // GET orders assigned to a delivery person
+    app.get("/delivery/orders", async (req, res) => {
+      const email = req.query.email;
+      if (!email) return res.send([]);
+      const result = await ordersCollection.find({ deliveryEmail: email }).sort({ timestamp: -1 }).toArray();
+      res.send(result);
+    });
+
+    // PATCH assign delivery person to order
+    app.patch("/orders/:id/assign", async (req, res) => {
+      const id = req.params.id;
+      const { deliveryEmail, deliveryName } = req.body;
+      const result = await ordersCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { deliveryEmail, deliveryName, status: "Out for Delivery" } }
+      );
+      res.send(result);
+    });
+
+    // PATCH update delivery location
+    app.patch("/orders/:id/location", async (req, res) => {
+      const id = req.params.id;
+      const { lat, lng, address } = req.body;
+      const result = await ordersCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { deliveryLocation: { lat, lng, address }, updatedAt: new Date() } }
+      );
+      res.send(result);
+    });
+
     // ==========================================
 
     // POST a new order
@@ -119,8 +153,7 @@ async function run() {
     // ==========================================
     // REVIEWS API ENDPOINTS
     // ==========================================
-    const reviewsCollection = db.collection('reviews');
-
+   
     app.post("/reviews", async (req, res) => {
       const review = req.body;
       review.timestamp = new Date();
@@ -134,24 +167,56 @@ async function run() {
       const result = await reviewsCollection.find(query).sort({ timestamp: -1 }).toArray();
       res.send(result);
     });
+
+    app.get("/user-reviews", async (req, res) => {
+      const email = req.query.email;
+      if (!email) return res.send([]);
+      const query = { email: email };
+      const result = await reviewsCollection.find(query).sort({ timestamp: -1 }).toArray();
+      res.send(result);
+    });
+    // ==========================================
+
+    // ==========================================
+    // WISHLIST API ENDPOINTS
+    // ==========================================
+    
+
+    app.post("/wishlists", async (req, res) => {
+      const item = req.body;
+      const query = { email: item.email, foodId: item.foodId };
+      const existingItem = await wishlistsCollection.findOne(query);
+      if (existingItem) {
+        return res.send({ message: "Item already in wishlist", insertedId: null });
+      }
+      const result = await wishlistsCollection.insertOne(item);
+      res.send(result);
+    });
+
+    app.get("/wishlists", async (req, res) => {
+      const email = req.query.email;
+      if (!email) {
+        return res.send([]);
+      }
+      const query = { email: email };
+      const result = await wishlistsCollection.find(query).toArray();
+      res.send(result);
+    });
+
+    app.delete("/wishlists/:id", async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await wishlistsCollection.deleteOne(query);
+      res.send(result);
+    });
     // ==========================================
 
 
-    // 🔥 ONLY Google Users Save API
+    // Save user to MongoDB (both email/password and Google)
     app.post("/users", async (req, res) => {
       const user = req.body;
+      console.log("User received:", user);
 
-      console.log("Google User Received:", user);
-
-      // Only allow users that have provider: 'google'
-      if (user.provider !== "google") {
-        return res.status(403).send({
-          success: false,
-          message: "Only Google users can be saved"
-        });
-      }
-
-      // Google user must have an email
       if (!user.email) {
         return res.status(400).send({ message: "Email is required" });
       }
@@ -182,6 +247,32 @@ async function run() {
         message: "User saved successfully",
         data: result
       });
+    });
+
+    // GET user by email
+    app.get("/users/by-email/:email", async (req, res) => {
+      const email = req.params.email;
+      const user = await usersCollection.findOne({ email });
+      if (!user) return res.status(404).send({ message: "User not found" });
+      res.send(user);
+    });
+
+    // PATCH update user role by _id
+    app.patch("/users/role/:id", async (req, res) => {
+      const id = req.params.id;
+      const { role } = req.body;
+      const result = await usersCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { role } }
+      );
+      res.send(result);
+    });
+
+    // DELETE user by _id
+    app.delete("/users/:id", async (req, res) => {
+      const id = req.params.id;
+      const result = await usersCollection.deleteOne({ _id: new ObjectId(id) });
+      res.send(result);
     });
 
     // GET all users (For Admin Dashboard)
