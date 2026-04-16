@@ -1,514 +1,387 @@
-const express = require('express')
+const express = require('express');
 const cors = require('cors');
-const app = express()
-require('dotenv').config()
+const app = express();
+require('dotenv').config();
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
-const port = process.env.PORT || 5000
+const port = process.env.PORT || 5000;
 
-// middleware
 app.use(express.json());
-app.use(cors({
-  origin: true,
-  credentials: true,
-}));
-
+app.use(cors({ origin: true, credentials: true }));
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.z4bua.mongodb.net/?appName=Cluster0`;
-
-// Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(uri, {
-  serverApi: {
-    version: ServerApiVersion.v1,
-    strict: true,
-    deprecationErrors: true,
-  }
+  serverApi: { version: ServerApiVersion.v1, strict: true, deprecationErrors: true }
 });
 
-async function run() {
-  try {
+let db;
+async function connectDB() {
+  if (!db) {
     await client.connect();
+    db = client.db('food_db');
     console.log("✅ Connected to MongoDB!");
-
-    const db = client.db('food_db');
-    const usersCollection = db.collection('users');
-    const foodsCollection = db.collection('foods');
-    const cartsCollection = db.collection('carts');
-    const ordersCollection = db.collection('orders');
-    const reviewsCollection = db.collection('reviews');
-    const wishlistsCollection = db.collection('wishlists');
-    const notificationsCollection = db.collection('notifications');
-
-    // ==========================================
-    // CARTS API ENDPOINTS
-    // ==========================================
-
-    // GET cart items by user email
-    app.get("/carts", async (req, res) => {
-      const email = req.query.email;
-      if (!email) {
-        return res.send([]);
-      }
-      const query = { email: email };
-      const result = await cartsCollection.find(query).toArray();
-      res.send(result);
-    });
-
-    // POST item to cart
-    app.post("/carts", async (req, res) => {
-      const cartItem = req.body;
-      const result = await cartsCollection.insertOne(cartItem);
-      res.send(result);
-    });
-
-    // DELETE item from cart
-    app.delete("/carts/:id", async (req, res) => {
-      const id = req.params.id;
-      const query = { _id: new ObjectId(id) };
-      const result = await cartsCollection.deleteOne(query);
-      res.send(result);
-    });
-
-    // PATCH update quantity in cart
-    app.patch("/carts/:id", async (req, res) => {
-      const id = req.params.id;
-      const { quantity } = req.body;
-      const filter = { _id: new ObjectId(id) };
-      const updateDoc = {
-        $set: { quantity: quantity },
-      };
-      const result = await cartsCollection.updateOne(filter, updateDoc);
-      res.send(result);
-    });
-    // ==========================================
-
-    // ==========================================
-    // DELIVERY API ENDPOINTS
-    // ==========================================
-
-    // GET orders assigned to a delivery person
-    app.get("/delivery/orders", async (req, res) => {
-      const email = req.query.email;
-      if (!email) return res.send([]);
-      const result = await ordersCollection.find({ deliveryEmail: email }).sort({ timestamp: -1 }).toArray();
-      res.send(result);
-    });
-
-    // PATCH assign delivery person to order
-    app.patch("/orders/:id/assign", async (req, res) => {
-      const id = req.params.id;
-      const { deliveryEmail, deliveryName } = req.body;
-      const result = await ordersCollection.updateOne(
-        { _id: new ObjectId(id) },
-        { $set: { deliveryEmail, deliveryName, status: "Out for Delivery" } }
-      );
-      res.send(result);
-    });
-
-    // PATCH update delivery location
-    app.patch("/orders/:id/location", async (req, res) => {
-      const id = req.params.id;
-      const { lat, lng, address } = req.body;
-      const result = await ordersCollection.updateOne(
-        { _id: new ObjectId(id) },
-        { $set: { deliveryLocation: { lat, lng, address }, updatedAt: new Date() } }
-      );
-      res.send(result);
-    });
-
-    // ==========================================
-
-    // POST a new order
-    app.post("/orders", async (req, res) => {
-      const orderData = req.body;
-      const result = await ordersCollection.insertOne(orderData);
-
-      // Notify customer
-      await createNotification({
-        recipientEmail: orderData.customerEmail,
-        type: "order_placed",
-        title: "Order Placed Successfully!",
-        message: `Your order of $${orderData.grandTotal} has been received and is being processed.`,
-        link: "/Dashboard/MyOrders",
-      });
-
-      // Notify all admins
-      const admins = await usersCollection.find({ role: "admin" }).toArray();
-      for (const admin of admins) {
-        await createNotification({
-          recipientEmail: admin.email,
-          type: "new_order",
-          title: "New Order Received!",
-          message: `${orderData.customerName} placed an order worth $${orderData.grandTotal}.`,
-          link: "/Dashboard/ManageOrders",
-        });
-      }
-
-      res.send(result);
-    });
-
-    // GET all orders (For Admin)
-    app.get("/orders/admin/all", async (req, res) => {
-      const result = await ordersCollection.find().sort({ timestamp: -1 }).toArray();
-      res.send(result);
-    });
-
-    // GET orders by user email
-    app.get("/orders", async (req, res) => {
-      const email = req.query.email;
-      if (!email) {
-        return res.send([]);
-      }
-      const query = { customerEmail: email };
-      const result = await ordersCollection.find(query).sort({ timestamp: -1 }).toArray();
-      res.send(result);
-    });
-
-    // PATCH update order status (For Admin)
-    app.patch("/orders/:id/status", async (req, res) => {
-      const id = req.params.id;
-      const { status } = req.body;
-      const filter = { _id: new ObjectId(id) };
-      const updateDoc = { $set: { status: status } };
-      const result = await ordersCollection.updateOne(filter, updateDoc);
-
-      // Notify customer about status change
-      const order = await ordersCollection.findOne(filter);
-      if (order?.customerEmail) {
-        const messages = {
-          "Cooking":          "Your order is now being cooked! 🍳",
-          "Out for Delivery": "Your order is on the way! 🚴",
-          "Delivered":        "Your order has been delivered! Enjoy your meal 🎉",
-        };
-        if (messages[status]) {
-          await createNotification({
-            recipientEmail: order.customerEmail,
-            type: "order_status",
-            title: `Order ${status}`,
-            message: messages[status],
-            link: "/Dashboard/MyOrders",
-          });
-        }
-      }
-
-      res.send(result);
-    });
-    // ==========================================
-
-    // ==========================================
-    // CONTACT API
-    // ==========================================
-    app.post("/contact", async (req, res) => {
-      const { name, email, subject, message } = req.body;
-      if (!name || !email || !message) return res.status(400).send({ message: "All fields required" });
-      const result = await db.collection('contacts').insertOne({
-        name, email, subject, message, createdAt: new Date(), read: false
-      });
-      res.send({ success: true, data: result });
-    });
-    // ==========================================
-
-    // ==========================================
-    // NOTIFICATIONS API
-    // ==========================================
-
-    // Helper: create a notification
-    const createNotification = async ({ recipientEmail, type, title, message, link = "/" }) => {
-      await notificationsCollection.insertOne({
-        recipientEmail,
-        type, // order_placed | order_status | new_order | new_review | new_user
-        title,
-        message,
-        link,
-        read: false,
-        createdAt: new Date(),
-      });
-    };
-
-    // GET notifications for a user
-    app.get("/notifications", async (req, res) => {
-      const email = req.query.email;
-      if (!email) return res.send([]);
-      const result = await notificationsCollection
-        .find({ recipientEmail: email })
-        .sort({ createdAt: -1 })
-        .limit(20)
-        .toArray();
-      res.send(result);
-    });
-
-    // GET unread count
-    app.get("/notifications/unread-count", async (req, res) => {
-      const email = req.query.email;
-      if (!email) return res.send({ count: 0 });
-      const count = await notificationsCollection.countDocuments({ recipientEmail: email, read: false });
-      res.send({ count });
-    });
-
-    // PATCH mark one as read
-    app.patch("/notifications/:id/read", async (req, res) => {
-      const id = req.params.id;
-      const result = await notificationsCollection.updateOne(
-        { _id: new ObjectId(id) },
-        { $set: { read: true } }
-      );
-      res.send(result);
-    });
-
-    // PATCH mark all as read
-    app.patch("/notifications/mark-all-read", async (req, res) => {
-      const { email } = req.body;
-      const result = await notificationsCollection.updateMany(
-        { recipientEmail: email, read: false },
-        { $set: { read: true } }
-      );
-      res.send(result);
-    });
-
-    // DELETE all notifications for user
-    app.delete("/notifications", async (req, res) => {
-      const email = req.query.email;
-      const result = await notificationsCollection.deleteMany({ recipientEmail: email });
-      res.send(result);
-    });
-
-    // ==========================================
-   
-    app.post("/reviews", async (req, res) => {
-      const review = req.body;
-      review.timestamp = new Date();
-      const result = await reviewsCollection.insertOne(review);
-      res.send(result);
-    });
-
-    app.get("/reviews/:foodId", async (req, res) => {
-      const foodId = req.params.foodId;
-      const query = { foodId: foodId };
-      const result = await reviewsCollection.find(query).sort({ timestamp: -1 }).toArray();
-      res.send(result);
-    });
-
-    app.get("/user-reviews", async (req, res) => {
-      const email = req.query.email;
-      if (!email) return res.send([]);
-      const query = { email: email };
-      const result = await reviewsCollection.find(query).sort({ timestamp: -1 }).toArray();
-      res.send(result);
-    });
-    // ==========================================
-
-    // ==========================================
-    // WISHLIST API ENDPOINTS
-    // ==========================================
-    
-
-    app.post("/wishlists", async (req, res) => {
-      const item = req.body;
-      const query = { email: item.email, foodId: item.foodId };
-      const existingItem = await wishlistsCollection.findOne(query);
-      if (existingItem) {
-        return res.send({ message: "Item already in wishlist", insertedId: null });
-      }
-      const result = await wishlistsCollection.insertOne(item);
-      res.send(result);
-    });
-
-    app.get("/wishlists", async (req, res) => {
-      const email = req.query.email;
-      if (!email) {
-        return res.send([]);
-      }
-      const query = { email: email };
-      const result = await wishlistsCollection.find(query).toArray();
-      res.send(result);
-    });
-
-    app.delete("/wishlists/:id", async (req, res) => {
-      const id = req.params.id;
-      const query = { _id: new ObjectId(id) };
-      const result = await wishlistsCollection.deleteOne(query);
-      res.send(result);
-    });
-    // ==========================================
-
-
-    // Save user to MongoDB (both email/password and Google)
-    app.post("/users", async (req, res) => {
-      const user = req.body;
-      console.log("User received:", user);
-
-      if (!user.email) {
-        return res.status(400).send({ message: "Email is required" });
-      }
-
-      // Check if user already exists
-      const exists = await usersCollection.findOne({ email: user.email });
-
-      if (exists) {
-        return res.send({
-          success: false,
-          message: "User already exists",
-          user: exists
-        });
-      }
-
-      // Set default role to customer
-      const newUser = {
-        ...user,
-        role: "customer",
-        createdAt: new Date()
-      };
-
-      // Save Google user to DB
-      const result = await usersCollection.insertOne(newUser);
-
-      res.send({
-        success: true,
-        message: "User saved successfully",
-        data: result
-      });
-    });
-
-    // PATCH update user profile by email
-    app.patch("/users/update/:email", async (req, res) => {
-      const email = req.params.email;
-      const { name, photo } = req.body;
-      const result = await usersCollection.updateOne(
-        { email },
-        { $set: { name, photo } }
-      );
-      res.send(result);
-    });
-
-    // GET user by email
-    app.get("/users/by-email/:email", async (req, res) => {
-      const email = req.params.email;
-      const user = await usersCollection.findOne({ email });
-      if (!user) return res.status(404).send({ message: "User not found" });
-      res.send(user);
-    });
-
-    // PATCH update user role by _id
-    app.patch("/users/role/:id", async (req, res) => {
-      const id = req.params.id;
-      const { role } = req.body;
-      const result = await usersCollection.updateOne(
-        { _id: new ObjectId(id) },
-        { $set: { role } }
-      );
-      res.send(result);
-    });
-
-    // DELETE user by _id
-    app.delete("/users/:id", async (req, res) => {
-      const id = req.params.id;
-      const result = await usersCollection.deleteOne({ _id: new ObjectId(id) });
-      res.send(result);
-    });
-
-    // GET all users (For Admin Dashboard)
-    app.get("/users", async (req, res) => {
-      const result = await usersCollection.find().toArray();
-      res.send(result);
-    });
-
-    // GET user role by email
-    app.get("/users/role/:email", async (req, res) => {
-      const email = req.params.email;
-      const query = { email: email };
-      const user = await usersCollection.findOne(query);
-      let role = "customer";
-      if (user?.role) {
-        role = user.role;
-      }
-      res.send({ role });
-    });
-
-
-
-    // GET all foods
-    app.get("/foods", async (req, res) => {
-      const result = await foodsCollection.find().toArray();
-      res.send(result);
-    });
-
-    // POST new food
-    app.post("/foods", async (req, res) => {
-      const food = req.body;
-      if (!food.title || !food.description) {
-        return res.status(400).send({ message: "Title and Description are required" });
-      }
-      const result = await foodsCollection.insertOne(food);
-      res.send({ success: true, data: result });
-    });
-
-    // GET single food by id
-    app.get("/foods/:id", async (req, res) => {
-      const { id } = req.params;
-      // const ObjectId = require("mongodb").ObjectId;
-
-      try {
-        const food = await foodsCollection.findOne({ _id: new ObjectId(id) });
-        if (!food) {
-          return res.status(404).send({ message: "Food not found" });
-        }
-        res.send(food);
-      } catch (error) {
-        res.status(500).send({ message: error.message });
-      }
-    });
-
-    // GET all foods, sorted by price ascending
-    app.get("/foods", async (req, res) => {
-      try {
-        // Optional: ?sort=asc or ?sort=desc
-        const sortOrder = req.query.sort === "desc" ? -1 : 1;
-
-        const foods = await foodsCollection
-          .find()
-          .sort({ price: sortOrder })  // sort by price
-          .toArray();
-
-        res.send(foods);
-      } catch (err) {
-        console.error(err);
-        res.status(500).send({ message: "Failed to fetch foods" });
-      }
-    });
-
-    // DELETE food by id
-    app.delete("/foods/:id", async (req, res) => {
-      const { id } = req.params;
-
-      try {
-        const result = await foodsCollection.deleteOne({ _id: new ObjectId(id) });
-        if (result.deletedCount === 0) {
-          return res.status(404).send({ message: "Food not found" });
-        }
-        res.send({ success: true, message: "Food deleted successfully" });
-      } catch (error) {
-        res.status(500).send({ message: error.message });
-      }
-    });
-
-
-
-
-    // Send a ping to confirm a successful connection
-    await client.db("admin").command({ ping: 1 });
-    console.log("Pinged your deployment. You successfully connected to MongoDB!");
-  } finally {
-    // Ensures that the client will close when you finish/error
-    // await client.close();
   }
+  return db;
 }
-run().catch(console.dir);
 
+// ── FOODS ──
+app.get('/foods', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const sortOrder = req.query.sort === 'desc' ? -1 : 1;
+    const result = await database.collection('foods').find().sort({ price: sortOrder }).toArray();
+    res.send(result);
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
 
+app.post('/foods', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const food = req.body;
+    if (!food.title || !food.description) return res.status(400).send({ message: 'Title and Description required' });
+    const result = await database.collection('foods').insertOne(food);
+    res.send({ success: true, data: result });
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
 
-app.get('/', (req, res) => {
-  res.send('Hello World!')
-})
+app.get('/foods/:id', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const food = await database.collection('foods').findOne({ _id: new ObjectId(req.params.id) });
+    if (!food) return res.status(404).send({ message: 'Food not found' });
+    res.send(food);
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
 
-app.listen(port, () => {
-  console.log(`Example app listening on port ${port}`)
-})
+app.delete('/foods/:id', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const result = await database.collection('foods').deleteOne({ _id: new ObjectId(req.params.id) });
+    if (result.deletedCount === 0) return res.status(404).send({ message: 'Food not found' });
+    res.send({ success: true });
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
+
+// ── CARTS ──
+app.get('/carts', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const email = req.query.email;
+    if (!email) return res.send([]);
+    const result = await database.collection('carts').find({ email }).toArray();
+    res.send(result);
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
+
+app.post('/carts', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const result = await database.collection('carts').insertOne(req.body);
+    res.send(result);
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
+
+app.patch('/carts/:id', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const result = await database.collection('carts').updateOne(
+      { _id: new ObjectId(req.params.id) },
+      { $set: { quantity: req.body.quantity } }
+    );
+    res.send(result);
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
+
+app.delete('/carts/:id', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const result = await database.collection('carts').deleteOne({ _id: new ObjectId(req.params.id) });
+    res.send(result);
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
+
+// ── ORDERS ──
+app.post('/orders', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const orderData = req.body;
+    const result = await database.collection('orders').insertOne(orderData);
+    // Notify customer
+    await database.collection('notifications').insertOne({
+      recipientEmail: orderData.customerEmail, type: 'order_placed',
+      title: 'Order Placed!', message: `Your order of $${orderData.grandTotal} is being processed.`,
+      link: '/Dashboard/MyOrders', read: false, createdAt: new Date()
+    });
+    // Notify admins
+    const admins = await database.collection('users').find({ role: 'admin' }).toArray();
+    for (const admin of admins) {
+      await database.collection('notifications').insertOne({
+        recipientEmail: admin.email, type: 'new_order',
+        title: 'New Order!', message: `${orderData.customerName} placed $${orderData.grandTotal} order.`,
+        link: '/Dashboard/ManageOrders', read: false, createdAt: new Date()
+      });
+    }
+    res.send(result);
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
+
+app.get('/orders/admin/all', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const result = await database.collection('orders').find().sort({ timestamp: -1 }).toArray();
+    res.send(result);
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
+
+app.get('/orders', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const email = req.query.email;
+    if (!email) return res.send([]);
+    const result = await database.collection('orders').find({ customerEmail: email }).sort({ timestamp: -1 }).toArray();
+    res.send(result);
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
+
+app.patch('/orders/:id/status', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const { status } = req.body;
+    const filter = { _id: new ObjectId(req.params.id) };
+    const result = await database.collection('orders').updateOne(filter, { $set: { status } });
+    const order = await database.collection('orders').findOne(filter);
+    const messages = { 'Cooking': 'Your order is being cooked! 🍳', 'Out for Delivery': 'On the way! 🚴', 'Delivered': 'Delivered! Enjoy 🎉' };
+    if (order?.customerEmail && messages[status]) {
+      await database.collection('notifications').insertOne({
+        recipientEmail: order.customerEmail, type: 'order_status',
+        title: `Order ${status}`, message: messages[status],
+        link: '/Dashboard/MyOrders', read: false, createdAt: new Date()
+      });
+    }
+    res.send(result);
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
+
+app.patch('/orders/:id/assign', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const { deliveryEmail, deliveryName } = req.body;
+    const result = await database.collection('orders').updateOne(
+      { _id: new ObjectId(req.params.id) },
+      { $set: { deliveryEmail, deliveryName, status: 'Out for Delivery' } }
+    );
+    res.send(result);
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
+
+app.patch('/orders/:id/location', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const { lat, lng, address } = req.body;
+    const result = await database.collection('orders').updateOne(
+      { _id: new ObjectId(req.params.id) },
+      { $set: { deliveryLocation: { lat, lng, address }, updatedAt: new Date() } }
+    );
+    res.send(result);
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
+
+// ── DELIVERY ──
+app.get('/delivery/orders', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const email = req.query.email;
+    if (!email) return res.send([]);
+    const result = await database.collection('orders').find({ deliveryEmail: email }).sort({ timestamp: -1 }).toArray();
+    res.send(result);
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
+
+// ── REVIEWS ──
+app.post('/reviews', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const review = { ...req.body, timestamp: new Date() };
+    const result = await database.collection('reviews').insertOne(review);
+    res.send(result);
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
+
+app.get('/reviews/:foodId', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const result = await database.collection('reviews').find({ foodId: req.params.foodId }).sort({ timestamp: -1 }).toArray();
+    res.send(result);
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
+
+app.get('/user-reviews', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const email = req.query.email;
+    if (!email) return res.send([]);
+    const result = await database.collection('reviews').find({ email }).sort({ timestamp: -1 }).toArray();
+    res.send(result);
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
+
+// ── WISHLISTS ──
+app.post('/wishlists', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const item = req.body;
+    const existing = await database.collection('wishlists').findOne({ email: item.email, foodId: item.foodId });
+    if (existing) return res.send({ message: 'Item already in wishlist', insertedId: null });
+    const result = await database.collection('wishlists').insertOne(item);
+    res.send(result);
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
+
+app.get('/wishlists', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const email = req.query.email;
+    if (!email) return res.send([]);
+    const result = await database.collection('wishlists').find({ email }).toArray();
+    res.send(result);
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
+
+app.delete('/wishlists/:id', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const result = await database.collection('wishlists').deleteOne({ _id: new ObjectId(req.params.id) });
+    res.send(result);
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
+
+// ── USERS ──
+app.post('/users', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const user = req.body;
+    if (!user.email) return res.status(400).send({ message: 'Email required' });
+    const exists = await database.collection('users').findOne({ email: user.email });
+    if (exists) return res.send({ success: false, message: 'User already exists', user: exists });
+    const result = await database.collection('users').insertOne({ ...user, role: 'customer', createdAt: new Date() });
+    res.send({ success: true, data: result });
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
+
+app.get('/users', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const result = await database.collection('users').find().toArray();
+    res.send(result);
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
+
+app.get('/users/by-email/:email', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const user = await database.collection('users').findOne({ email: req.params.email });
+    if (!user) return res.status(404).send({ message: 'User not found' });
+    res.send(user);
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
+
+app.get('/users/role/:email', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const user = await database.collection('users').findOne({ email: req.params.email });
+    res.send({ role: user?.role || 'customer' });
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
+
+app.patch('/users/update/:email', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const { name, photo } = req.body;
+    const result = await database.collection('users').updateOne({ email: req.params.email }, { $set: { name, photo } });
+    res.send(result);
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
+
+app.patch('/users/role/:id', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const result = await database.collection('users').updateOne(
+      { _id: new ObjectId(req.params.id) }, { $set: { role: req.body.role } }
+    );
+    res.send(result);
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
+
+app.delete('/users/:id', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const result = await database.collection('users').deleteOne({ _id: new ObjectId(req.params.id) });
+    res.send(result);
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
+
+// ── NOTIFICATIONS ──
+app.get('/notifications', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const email = req.query.email;
+    if (!email) return res.send([]);
+    const result = await database.collection('notifications').find({ recipientEmail: email }).sort({ createdAt: -1 }).limit(20).toArray();
+    res.send(result);
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
+
+app.get('/notifications/unread-count', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const email = req.query.email;
+    if (!email) return res.send({ count: 0 });
+    const count = await database.collection('notifications').countDocuments({ recipientEmail: email, read: false });
+    res.send({ count });
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
+
+app.patch('/notifications/mark-all-read', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const result = await database.collection('notifications').updateMany(
+      { recipientEmail: req.body.email, read: false }, { $set: { read: true } }
+    );
+    res.send(result);
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
+
+app.patch('/notifications/:id/read', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const result = await database.collection('notifications').updateOne(
+      { _id: new ObjectId(req.params.id) }, { $set: { read: true } }
+    );
+    res.send(result);
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
+
+app.delete('/notifications', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const result = await database.collection('notifications').deleteMany({ recipientEmail: req.query.email });
+    res.send(result);
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
+
+// ── CONTACT ──
+app.post('/contact', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const { name, email, subject, message } = req.body;
+    if (!name || !email || !message) return res.status(400).send({ message: 'All fields required' });
+    const result = await database.collection('contacts').insertOne({ name, email, subject, message, createdAt: new Date(), read: false });
+    res.send({ success: true, data: result });
+  } catch (e) { res.status(500).send({ message: e.message }); }
+});
+
+// ── ROOT ──
+app.get('/', (req, res) => res.send('Hello World!'));
+
+app.listen(port, () => console.log(`Server running on port ${port}`));
+
+module.exports = app;
