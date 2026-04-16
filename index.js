@@ -7,7 +7,13 @@ const port = process.env.PORT || 5000
 
 // middleware
 app.use(express.json());
-app.use(cors());
+app.use(cors({
+  origin: [
+    "http://localhost:3000",
+    process.env.CLIENT_URL,
+  ].filter(Boolean),
+  credentials: true,
+}));
 
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.z4bua.mongodb.net/?appName=Cluster0`;
@@ -23,8 +29,8 @@ const client = new MongoClient(uri, {
 
 async function run() {
   try {
-    // Connect the client to the server	(optional starting in v4.7)
     await client.connect();
+    console.log("✅ Connected to MongoDB!");
 
     const db = client.db('food_db');
     const usersCollection = db.collection('users');
@@ -33,6 +39,7 @@ async function run() {
     const ordersCollection = db.collection('orders');
     const reviewsCollection = db.collection('reviews');
     const wishlistsCollection = db.collection('wishlists');
+    const notificationsCollection = db.collection('notifications');
 
     // ==========================================
     // CARTS API ENDPOINTS
@@ -117,6 +124,28 @@ async function run() {
     app.post("/orders", async (req, res) => {
       const orderData = req.body;
       const result = await ordersCollection.insertOne(orderData);
+
+      // Notify customer
+      await createNotification({
+        recipientEmail: orderData.customerEmail,
+        type: "order_placed",
+        title: "Order Placed Successfully!",
+        message: `Your order of $${orderData.grandTotal} has been received and is being processed.`,
+        link: "/Dashboard/MyOrders",
+      });
+
+      // Notify all admins
+      const admins = await usersCollection.find({ role: "admin" }).toArray();
+      for (const admin of admins) {
+        await createNotification({
+          recipientEmail: admin.email,
+          type: "new_order",
+          title: "New Order Received!",
+          message: `${orderData.customerName} placed an order worth $${orderData.grandTotal}.`,
+          link: "/Dashboard/ManageOrders",
+        });
+      }
+
       res.send(result);
     });
 
@@ -142,16 +171,109 @@ async function run() {
       const id = req.params.id;
       const { status } = req.body;
       const filter = { _id: new ObjectId(id) };
-      const updateDoc = {
-        $set: { status: status },
-      };
+      const updateDoc = { $set: { status: status } };
       const result = await ordersCollection.updateOne(filter, updateDoc);
+
+      // Notify customer about status change
+      const order = await ordersCollection.findOne(filter);
+      if (order?.customerEmail) {
+        const messages = {
+          "Cooking":          "Your order is now being cooked! 🍳",
+          "Out for Delivery": "Your order is on the way! 🚴",
+          "Delivered":        "Your order has been delivered! Enjoy your meal 🎉",
+        };
+        if (messages[status]) {
+          await createNotification({
+            recipientEmail: order.customerEmail,
+            type: "order_status",
+            title: `Order ${status}`,
+            message: messages[status],
+            link: "/Dashboard/MyOrders",
+          });
+        }
+      }
+
       res.send(result);
     });
     // ==========================================
 
     // ==========================================
-    // REVIEWS API ENDPOINTS
+    // CONTACT API
+    // ==========================================
+    app.post("/contact", async (req, res) => {
+      const { name, email, subject, message } = req.body;
+      if (!name || !email || !message) return res.status(400).send({ message: "All fields required" });
+      const result = await db.collection('contacts').insertOne({
+        name, email, subject, message, createdAt: new Date(), read: false
+      });
+      res.send({ success: true, data: result });
+    });
+    // ==========================================
+
+    // ==========================================
+    // NOTIFICATIONS API
+    // ==========================================
+
+    // Helper: create a notification
+    const createNotification = async ({ recipientEmail, type, title, message, link = "/" }) => {
+      await notificationsCollection.insertOne({
+        recipientEmail,
+        type, // order_placed | order_status | new_order | new_review | new_user
+        title,
+        message,
+        link,
+        read: false,
+        createdAt: new Date(),
+      });
+    };
+
+    // GET notifications for a user
+    app.get("/notifications", async (req, res) => {
+      const email = req.query.email;
+      if (!email) return res.send([]);
+      const result = await notificationsCollection
+        .find({ recipientEmail: email })
+        .sort({ createdAt: -1 })
+        .limit(20)
+        .toArray();
+      res.send(result);
+    });
+
+    // GET unread count
+    app.get("/notifications/unread-count", async (req, res) => {
+      const email = req.query.email;
+      if (!email) return res.send({ count: 0 });
+      const count = await notificationsCollection.countDocuments({ recipientEmail: email, read: false });
+      res.send({ count });
+    });
+
+    // PATCH mark one as read
+    app.patch("/notifications/:id/read", async (req, res) => {
+      const id = req.params.id;
+      const result = await notificationsCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { read: true } }
+      );
+      res.send(result);
+    });
+
+    // PATCH mark all as read
+    app.patch("/notifications/mark-all-read", async (req, res) => {
+      const { email } = req.body;
+      const result = await notificationsCollection.updateMany(
+        { recipientEmail: email, read: false },
+        { $set: { read: true } }
+      );
+      res.send(result);
+    });
+
+    // DELETE all notifications for user
+    app.delete("/notifications", async (req, res) => {
+      const email = req.query.email;
+      const result = await notificationsCollection.deleteMany({ recipientEmail: email });
+      res.send(result);
+    });
+
     // ==========================================
    
     app.post("/reviews", async (req, res) => {
@@ -247,6 +369,17 @@ async function run() {
         message: "User saved successfully",
         data: result
       });
+    });
+
+    // PATCH update user profile by email
+    app.patch("/users/update/:email", async (req, res) => {
+      const email = req.params.email;
+      const { name, photo } = req.body;
+      const result = await usersCollection.updateOne(
+        { email },
+        { $set: { name, photo } }
+      );
+      res.send(result);
     });
 
     // GET user by email
